@@ -1,0 +1,454 @@
+---
+title: "Predictive modeling of bank dataset"
+output: html_notebook
+---
+
+# Initial setup
+
+```{r setup, include=FALSE, message=FALSE}
+set.seed(33)
+options(max.print = 300)
+
+if (!require(pacman)) {
+  install.packages("pacman")
+  library(pacman)
+}
+p_install_gh("tidymodels/dials", "tidymodels/parsnip", "tidymodels/tune")
+p_load(doFuture, magrittr, tidyverse, tidymodels, parsnip, dials, tune, skimr, keras, DALEX, here
+)
+
+```
+
+```{r parallelization}
+all_cores <- parallel::detectCores(logical = FALSE)
+registerDoFuture()
+cl <- makeCluster(all_cores)
+plan(cluster, workers = cl)
+```
+
+```{r, message=FALSE}
+bank <- read_delim(here("data", "raw", "bank-full.csv"), delim = ";") %>% 
+  mutate_if(is.character, factor)
+
+bank_first <- bank %>% 
+  filter(previous == 0) %>% 
+  select(-c("contact", "day", "month", "pdays", "poutcome"))
+
+bank_repeat <- bank %>% 
+  filter(previous != 0)
+
+bank %>% 
+  skim()
+```
+
+```{r}
+round(prop.table(table(bank_first$y)), 2)
+round(prop.table(table(bank_repeat$y)), 2)
+```
+
+```{r}
+split_repeat <- initial_split(bank_repeat, prop = 3/4, strata = "y")
+
+train_repeat <- training(split_repeat)
+test_repeat  <- testing(split_repeat)
+
+train_cv_repeat <- vfold_cv(train_repeat, v = 10, repeats = 1, strata = "y")
+
+recipe_repeat <- train_repeat %>%
+  recipe(y ~ .) %>%
+  step_normalize(all_numeric()) %>%
+  step_dummy(all_nominal(), -y, one_hot = T) %>%
+  # Adding downsampling
+  step_downsample(y, under_ratio = tune())
+
+recipe_repeat_test <- train_repeat %>%
+  recipe(y ~ .) %>%
+  step_normalize(all_numeric()) %>%
+  step_dummy(all_nominal(), -y, one_hot = T)
+
+test_baked <- bake(prep(recipe_repeat_test), new_data = test_repeat)
+
+recipe_best <- recipe_repeat
+recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = rf_param_best$under_ratio)
+```
+
+```{r}
+rforest <- rand_forest(mtry = tune(),
+                       trees = tune(),
+                       min_n = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("ranger", importance = "permutation", splitrule = "gini")
+
+rf_grid <- grid_random(mtry(c(3, 15)),
+                       trees(),
+                       min_n(),
+                       under_ratio(),
+                       size = 10)
+
+rf_fit_repeat <- tune_grid(
+  recipe_repeat,
+  model = rforest,
+  rs = train_cv_repeat,
+  grid = rf_grid,
+  perf = metric_set(roc_auc, j_index, sens, spec),
+  control = grid_control(verbose = FALSE)
+)
+
+estimate(rf_fit_repeat) %>%
+  filter(.metric == "roc_auc") %>%
+  arrange(desc(mean))
+
+rf_param_best <- estimate(rf_fit_repeat) %>%
+  filter(.metric == "j_index") %>%
+  arrange(desc(mean)) %>% 
+  slice(1)
+
+
+rforest_best <-
+  rforest %>% update(mtry = rf_param_best$mtry,
+                     trees = rf_param_best$trees,
+                     min_n = rf_param_best$min_n) %>% 
+  fit(y ~ ., juice(prep(recipe_best)))
+
+rforest_best
+
+```
+
+```{r}
+glmnet <- logistic_reg(penalty = tune(),
+                       mixture = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+glmnet_grid <- grid_random(penalty(),
+                           mixture(),
+                           under_ratio(),
+                           size = 10)
+
+glmnet_fit_repeat <- tune_grid(
+  recipe_repeat,
+  model = glmnet,
+  rs = train_cv_repeat,
+  grid = glmnet_grid,
+  perf = metric_set(roc_auc, j_index, sens, spec),
+  control = grid_control(verbose = FALSE)
+)
+
+estimate(glmnet_fit_repeat) %>%
+  filter(.metric == "roc_auc") %>%
+  arrange(desc(mean))
+
+glmnet_param_best <- estimate(glmnet_fit_repeat) %>%
+  filter(.metric == "j_index") %>%
+  arrange(desc(mean)) %>% 
+  slice(1)
+
+glmnet_best <-
+  glmnet %>% update(penalty = glmnet_param_best$penalty,
+                     mixture = glmnet_param_best$mixture) %>% 
+  fit(y ~ ., juice(prep(recipe_best)))
+
+glmnet_best
+```
+
+```{r}
+xgboost <- boost_tree(
+  mtry = 12,
+  trees = 1500,
+  min_n = 12,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune()
+) %>%
+  set_mode("classification") %>%
+  set_engine("xgboost")
+
+xg_grid <- grid_random(tree_depth(),
+                       learn_rate(),
+                       loss_reduction(),
+                       under_ratio(),
+                       size = 10)
+
+xg_fit_repeat <- tune_grid(
+  recipe_repeat,
+  model = xgboost,
+  rs = train_cv_repeat,
+  grid = xg_grid,
+  perf = metric_set(roc_auc, j_index, sens, spec),
+  control = grid_control(verbose = FALSE)
+)
+
+estimate(xg_fit_repeat) %>%
+  filter(.metric == "roc_auc") %>%
+  arrange(desc(mean))
+
+xg_param_best <- estimate(xg_fit_repeat) %>%
+  filter(.metric == "j_index") %>%
+  arrange(desc(mean)) %>% 
+  slice(1)
+
+xg_best <-
+  xgboost %>% update(
+    tree_depth = xg_param_best$tree_depth,
+    learn_rate = xg_param_best$learn_rate,
+    loss_reduction = xg_param_best$loss_reduction
+  ) %>%
+  fit(y ~ ., juice(prep(recipe_best)))
+
+xg_best
+```
+
+```{r}
+svm <- svm_rbf(
+  cost = tune(),
+  rbf_sigma = tune(),
+  margin = tune()
+) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+svm_grid <- grid_random(cost(),
+                       rbf_sigma(),
+                       margin(),
+                       under_ratio(),
+                       size = 10)
+
+svm_fit_repeat <- tune_grid(
+  recipe_repeat,
+  model = svm,
+  rs = train_cv_repeat,
+  grid = svm_grid,
+  perf = metric_set(roc_auc, j_index, sens, spec),
+  control = grid_control(verbose = FALSE)
+)
+
+estimate(svm_fit_repeat) %>%
+  filter(.metric == "roc_auc") %>%
+  arrange(desc(mean))
+
+svm_param_best <- estimate(svm_fit_repeat) %>%
+  filter(.metric == "j_index") %>%
+  arrange(desc(mean)) %>% 
+  slice(1)
+
+svm_best <-
+  svm %>% update(
+    cost = svm_param_best$cost,
+    rbf_sigma = svm_param_best$rbf_sigma,
+    margin = svm_param_best$margin
+  ) %>%
+  fit(y ~ ., juice(prep(recipe_best)))
+
+svm_best
+```
+
+
+```{r}
+knn <- nearest_neighbor(
+  # neighbors = tune(),
+  #                       weight_func = tune(),
+  #                       dist_power = tune()
+                        ) %>%
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+knn_grid <- grid_random(neighbors(),
+                        weight_func(),
+                        dist_power(),
+                        under_ratio(),
+                        size = 10)
+
+knn_fit_repeat <- tune_grid(
+  recipe_repeat,
+  model = knn,
+  rs = train_cv_repeat,
+  # grid = knn_grid,
+  perf = metric_set(roc_auc, j_index, sens, spec),
+  control = grid_control(verbose = FALSE)
+)
+
+estimate(knn_fit_repeat) %>%
+  filter(.metric == "roc_auc") %>%
+  arrange(desc(mean))
+
+knn_param_best <- estimate(knn_fit_repeat) %>%
+  filter(.metric == "j_index") %>%
+  arrange(desc(mean)) %>% 
+  slice(1)
+
+knn_best <-
+  knn %>%
+  fit(y ~ ., juice(prep(recipe_best)))
+
+knn_best
+```
+
+```{r}
+test_repeat_results <- 
+  test_repeat %>%
+  select(y) %>%
+  as_tibble() %>%
+  mutate(
+    rf_class = predict(rforest_best, new_data = test_baked) %>% 
+      pull(.pred_class),
+    rf_prob  = predict(rforest_best, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_yes),
+    knn_class = predict(knn_best, new_data = test_baked) %>% 
+      pull(.pred_class),
+    knn_prob  = predict(knn_best, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_yes),
+    xg_class = predict(xg_best, new_data = test_baked) %>% 
+      pull(.pred_class),
+    xg_prob  = predict(xg_best, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_yes),
+    glmnet_class = predict(glmnet_best, new_data = test_baked) %>% 
+      pull(.pred_class),
+    glmnet_prob  = predict(glmnet_best, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_yes),
+    svm_class = predict(svm_best, new_data = test_baked) %>% 
+      pull(.pred_class),
+    svm_prob  = predict(svm_best, new_data = test_baked, type = "prob") %>% 
+      pull(.pred_yes),
+  )
+
+
+test_repeat_results
+```
+
+```{r}
+rf_auc <- test_repeat_results %>% roc_auc(truth = y, rf_prob) %>% 
+  mutate(.metric = "rf_auc")
+knn_auc <- test_repeat_results %>% roc_auc(truth = y, knn_prob) %>% 
+  mutate(.metric = "knn_auc")
+glmnet_auc <- test_repeat_results %>% roc_auc(truth = y, glmnet_prob) %>% 
+  mutate(.metric = "glmnet_auc")
+xg_auc <- test_repeat_results %>% roc_auc(truth = y, xg_prob) %>% 
+  mutate(.metric = "xg_auc")
+svm_auc <- test_repeat_results %>% roc_auc(truth = y, svm_prob) %>% 
+  mutate(.metric = "svm_auc")
+
+auc_all <- bind_rows(rf_auc, knn_auc) %>% 
+  bind_rows(glmnet_auc) %>% 
+  bind_rows(xg_auc) %>% 
+  bind_rows(svm_auc)
+
+auc_all %>% 
+  # spread(.metric, .estimate)
+  ggplot(aes(x = reorder(.metric, .estimate), y = .estimate, fill = .metric)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Models",
+       y = "AUC")
+```
+
+```{r}
+autoplot(search_res, type = "performance")
+autoplot(search_res, type = "marginals")
+autoplot(search_res, type = "parameters")
+```
+
+
+
+```{r}
+custom_predict <-
+  function(object, newdata) {
+    pred <- predict(object, newdata)
+    response <- as.numeric(pred$.pred_class)
+    return(response)
+  }
+
+test_baked_tmp <- test_baked %>% 
+  mutate(y = as.numeric(y))
+
+
+explainer_rf <-
+  DALEX::explain(
+    rforest_best,
+    data = select(test_baked, -y),
+    y = as.numeric(test_baked$y),
+    predict_function = custom_predict,
+    label = "Random Forest"
+  )
+
+explainer_knn <-
+  DALEX::explain(
+    knn_best,
+    data = select(test_baked, -y),
+    y = as.numeric(test_baked$y),
+    predict_function = custom_predict,
+    label = "K Nearest Neighbor"
+  )
+
+explainer_xg <-
+  DALEX::explain(
+    xg_best,
+    data = select(test_baked, -y),
+    y = as.numeric(test_baked$y),
+    predict_function = custom_predict,
+    label = "XGBoosted Tree"
+  )
+
+explainer_glmnet <-
+  DALEX::explain(
+    glmnet_best,
+    data = select(test_baked, -y),
+    y = as.numeric(test_baked$y),
+    predict_function = custom_predict,
+    label = "Penalized Logistic Regression"
+  )
+
+explainer_svm <-
+  DALEX::explain(
+    svm_best,
+    data = select(test_baked, -y),
+    y = as.numeric(test_baked$y),
+    predict_function = custom_predict,
+    label = "Support Vector Machine"
+  )
+```
+
+```{r}
+mp_rf <- model_performance(explainer_rf)
+mp_knn <- model_performance(explainer_knn)
+mp_glmnet <- model_performance(explainer_glmnet)
+mp_svm <- model_performance(explainer_svm)
+mp_xg <- model_performance(explainer_xg)
+
+plot(mp_rf, mp_xg, mp_glmnet, mp_svm, mp_knn)
+```
+
+```{r}
+vi_rf <- variable_importance(explainer_rf)
+vi_knn <- variable_importance(explainer_knn)
+vi_glmnet <- variable_importance(explainer_glmnet)
+vi_svm <- variable_importance(explainer_svm)
+vi_xg <- variable_importance(explainer_xg)
+
+plot(vi_rf, vi_xg, vi_glmnet)
+par(mfrow = c(1, 5))
+plot(vi_rf)
+plot(vi_xg)
+plot(vi_glmnet)
+plot(vi_svm)
+plot(vi_knn)
+```
+```{r}
+vi_dur_rf <- variable_response(explainer_rf, variable = "duration")
+vi_dur_knn <- variable_response(explainer_knn, variable = "duration")
+vi_dur_glmnet <- variable_response(explainer_glmnet, variable = "duration")
+vi_dur_svm <- variable_response(explainer_svm, variable = "duration")
+vi_dur_xg <- variable_response(explainer_xg, variable = "duration")
+
+plot(vi_dur_rf, vi_dur_xg, vi_dur_glmnet, vi_dur_svm, vi_dur_knn, use_facets = TRUE)
+```
+
+```{r}
+Donald <- test_baked %>% sample_n(1)
+
+sp_rf <- single_prediction(explainer_rf, Donald)
+sp_knn <- single_prediction(explainer_knn, Donald)
+sp_glmnet <- single_prediction(explainer_glmnet, Donald)
+sp_svm <- single_prediction(explainer_svm, Donald)
+sp_xg <- single_prediction(explainer_xg, Donald)
+
+plot(sp_rf, sp_glmnet, sp_xg, sp_svm, sp_knn)
+```

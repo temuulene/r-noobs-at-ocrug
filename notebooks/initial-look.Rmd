@@ -12,7 +12,7 @@ library(here) # Constructs paths to your project's files
 
 # Look at data
 ```{r}
-bank_raw <- read_delim(here("data", "raw", "bank-full.csv"), delim = ";") %>% 
+bank_raw <- read_delim(here::here("data", "raw", "bank-full.csv"), delim = ";") %>% 
   mutate_if(is.character, factor)
 
 bank_raw %>% 
@@ -44,8 +44,10 @@ bank_raw %>%
 ```
 ```{r}
 bank_raw %>% 
-  mutate(factor(previous)) %>% 
-  count(previous, sort = T)
+  filter(previous > 20) %>% 
+  arrange(age, job, marital, education, default, housing, loan)
+  filter(!distinct(age, job, marital, education, default, housing, loan))
+
 ```
 
 
