@@ -1,0 +1,51 @@
+---
+title: "R-noobs initial data look"
+output: html_notebook
+---
+```{r setup}
+library(tidyverse) #Set of packages for tidy data
+library(lubridate) #Works with date
+library(skimr) # For exploration
+library(compareGroups) #for comparing groups
+library(here) # Constructs paths to your project's files
+```
+
+# Look at data
+```{r}
+bank_raw <- read_delim(here("data", "raw", "bank-full.csv"), delim = ";") %>% 
+  mutate_if(is.character, factor)
+
+bank_raw %>% 
+  skim()
+```
+
+```{r}
+tab <- descrTable(y ~ ., bank_raw)
+
+export2md(
+  tab,
+  strip = TRUE,
+  first = TRUE,
+  format = "html",
+  header.background = "blue",
+  header.color = "white",
+  caption = "Summary stats by product subscription"
+)
+```
+
+```{r}
+bank_raw %>% 
+  distinct(age, marital, education, job, default, balance, housing, loan)
+```
+
+```{r}
+bank_raw %>% 
+  filter(previous == 0)
+```
+```{r}
+bank_raw %>% 
+  mutate(factor(previous)) %>% 
+  count(previous, sort = T)
+```
+
+
