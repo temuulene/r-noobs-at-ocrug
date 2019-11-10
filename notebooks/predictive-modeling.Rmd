@@ -69,7 +69,7 @@ recipe_repeat_test <- train_repeat %>%
 test_baked <- bake(prep(recipe_repeat_test), new_data = test_repeat)
 
 recipe_best <- recipe_repeat
-recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = rf_param_best$under_ratio)
+
 ```
 
 ```{r}
@@ -103,6 +103,7 @@ rf_param_best <- estimate(rf_fit_repeat) %>%
   arrange(desc(mean)) %>% 
   slice(1)
 
+recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = rf_param_best$under_ratio)
 
 rforest_best <-
   rforest %>% update(mtry = rf_param_best$mtry,
@@ -142,6 +143,8 @@ glmnet_param_best <- estimate(glmnet_fit_repeat) %>%
   filter(.metric == "j_index") %>%
   arrange(desc(mean)) %>% 
   slice(1)
+
+recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = glmnet_param_best$under_ratio)
 
 glmnet_best <-
   glmnet %>% update(penalty = glmnet_param_best$penalty,
@@ -187,6 +190,8 @@ xg_param_best <- estimate(xg_fit_repeat) %>%
   arrange(desc(mean)) %>% 
   slice(1)
 
+recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = xg_param_best$under_ratio)
+
 xg_best <-
   xgboost %>% update(
     tree_depth = xg_param_best$tree_depth,
@@ -230,6 +235,8 @@ svm_param_best <- estimate(svm_fit_repeat) %>%
   filter(.metric == "j_index") %>%
   arrange(desc(mean)) %>% 
   slice(1)
+
+recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = svm_param_best$under_ratio)
 
 svm_best <-
   svm %>% update(
@@ -275,6 +282,8 @@ knn_param_best <- estimate(knn_fit_repeat) %>%
   filter(.metric == "j_index") %>%
   arrange(desc(mean)) %>% 
   slice(1)
+
+recipe_best$steps[[3]] <- update(recipe_repeat$steps[[3]], under_ratio = knn_param_best$under_ratio)
 
 knn_best <-
   knn %>%
